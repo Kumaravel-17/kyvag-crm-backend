@@ -1,0 +1,64 @@
+# Kyvag CRM: Postgres, the API, the web app, and Caddy in front (HTTP, or automatic HTTPS once SITE_ADDRESS is a domain).
+# Expects the frontend repo checked out next to this one (FRONTEND_DIR). Settings come from deploy/.env (see .env.example).
+name: kyvag
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: kyvag
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in deploy/.env}
+      POSTGRES_DB: kyvag
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kyvag -d kyvag"]
+      interval: 5s
+      retries: 20
+
+  backend:
+    build: ..
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://kyvag:${POSTGRES_PASSWORD}@db:5432/kyvag?schema=public
+      PORT: "4000"
+      APP_URL: ${APP_URL:?Set APP_URL in deploy/.env}
+      CORS_ORIGIN: ${APP_URL}
+      # Secure cookies need HTTPS; turn on once the site has a domain
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      # Requests arrive through Caddy and the web app, both on Docker's private network
+      TRUST_PROXY: loopback, uniquelocal
+      TIME_ZONE: ${TIME_ZONE:-Asia/Kolkata}
+
+  frontend:
+    build:
+      context: ${FRONTEND_DIR:-../../crm-kyvag}
+      args:
+        API_URL: http://backend:4000
+    restart: unless-stopped
+    depends_on:
+      - backend
+
+  caddy:
+    image: caddy:2.10-alpine
+    restart: unless-stopped
+    ports:
+      - "${HTTP_PORT:-80}:80"
+      - "${HTTPS_PORT:-443}:443"
+    environment:
+      SITE_ADDRESS: ${SITE_ADDRESS:-:80}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - frontend
+
+volumes:
+  pgdata:
+  caddy_data:
+  caddy_config:

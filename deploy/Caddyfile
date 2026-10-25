@@ -1,0 +1,5 @@
+# ":80" serves plain HTTP on any address; a domain name (crm.example.com) gets a free HTTPS certificate automatically
+{$SITE_ADDRESS::80} {
+	encode zstd gzip
+	reverse_proxy frontend:3000
+}
