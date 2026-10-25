@@ -1,0 +1,40 @@
+# Two-server setup, API side: Postgres and the API. The API listens on port 4000 for the web server
+# (allow it in this server's security group from the web server only). Settings from deploy/.env.
+name: kyvag
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: kyvag
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in deploy/.env}
+      POSTGRES_DB: kyvag
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kyvag -d kyvag"]
+      interval: 5s
+      retries: 20
+
+  backend:
+    build: ..
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "4000:4000"
+    environment:
+      DATABASE_URL: postgresql://kyvag:${POSTGRES_PASSWORD}@db:5432/kyvag?schema=public
+      PORT: "4000"
+      # The address people open, on the web server
+      APP_URL: ${APP_URL:?Set APP_URL in deploy/.env}
+      CORS_ORIGIN: ${APP_URL}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      # Requests arrive from the web server over the private network
+      TRUST_PROXY: loopback, uniquelocal
+      TIME_ZONE: ${TIME_ZONE:-Asia/Kolkata}
+
+volumes:
+  pgdata:

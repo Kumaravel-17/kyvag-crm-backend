@@ -55,6 +55,7 @@ sudo bash install.sh
 
 It installs Docker, checks both repos out under `/opt/kyvag`, writes `deploy/.env` with a random database password, starts everything, and prints the sign-in email and a random password (also saved in `/root/kyvag-login.txt`). Run it again to update; data and settings are kept.
 
+- **Two servers** (database + API on one, web app on the other): run `sudo ROLE=api APP_URL=http://<web server IP> bash install.sh` on the API server and `sudo ROLE=web API_URL=http://<API server private IP>:4000 bash install.sh` on the web server. Allow port 4000 on the API server from the web server only.
 - **HTTPS:** point a domain at the server, then in `/opt/kyvag/kyvag-crm-backend/deploy/.env` set `SITE_ADDRESS=crm.example.com`, `APP_URL=https://crm.example.com`, `COOKIE_SECURE=true`, and run `docker compose up -d` there. Caddy gets the certificate (port 443 must be open).
 - **Reset the password:** `docker compose exec -e ADMIN_EMAIL=… -e ADMIN_PASSWORD=… backend node dist/create-admin.js` in the `deploy` folder.
 - **Logs:** `docker compose logs -f backend` (or `frontend`, `caddy`, `db`).
