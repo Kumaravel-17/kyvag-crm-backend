@@ -3,7 +3,7 @@ import cors from "cors";
 import express from "express";
 import { authenticate, checkOrigin } from "./auth/middleware.js";
 import { config } from "./config.js";
-import { purgeExpired } from "./db.js";
+import { ensureDefaultStages, prisma, purgeExpired } from "./db.js";
 import { errorHandler } from "./http.js";
 import { apiRoutes } from "./routes/index.js";
 
@@ -22,9 +22,18 @@ app.use("/api", apiRoutes);
 
 app.use(errorHandler);
 
-purgeExpired();
-setInterval(purgeExpired, 60 * 60_000).unref();
+// Expired sessions and reset links are refused anyway; this just keeps the tables small
+const purge = () => purgeExpired().catch((e) => console.error("Cleanup of expired sessions failed:", e));
 
-app.listen(config.port, () => {
+await ensureDefaultStages();
+purge();
+setInterval(purge, 60 * 60_000).unref();
+
+const server = app.listen(config.port, () => {
   console.log(`API listening on http://localhost:${config.port}`);
 });
+
+// Lets in-flight requests finish and closes the database pool when the process manager stops the app
+for (const signal of ["SIGINT", "SIGTERM"] as const) {
+  process.once(signal, () => server.close(() => prisma.$disconnect().finally(() => process.exit(0))));
+}

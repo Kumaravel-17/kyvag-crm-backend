@@ -1,21 +1,21 @@
 import type { Request, RequestHandler } from "express";
 import { rateLimit } from "express-rate-limit";
 import { config } from "../config.js";
-import type { Role, SessionRow, UserRow } from "../db.js";
+import type { Role, Session, User } from "../db.js";
 import { HttpError } from "../http.js";
 import { clearSessionCookie, resumeSession, SESSION_COOKIE } from "./sessions.js";
 
 declare global {
   namespace Express {
     interface Request {
-      auth?: { user: UserRow; session: SessionRow };
+      auth?: { user: User; session: Session };
     }
   }
 }
 
 /** Attaches req.auth when the session cookie is valid; never rejects on its own */
-export const authenticate: RequestHandler = (req, res, next) => {
-  const auth = resumeSession(req, res);
+export const authenticate: RequestHandler = async (req, res, next) => {
+  const auth = await resumeSession(req, res);
   if (auth) req.auth = auth;
   else if (req.cookies?.[SESSION_COOKIE]) clearSessionCookie(res);
   next();
@@ -49,7 +49,7 @@ export const guessLimit = rateLimit({
   message: { error: "Too many attempts. Wait a few minutes and try again." },
 });
 
-const SAFE_METHODS =new Set(["GET", "HEAD", "OPTIONS"]);
+const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
 
 /**
  * CSRF guard on top of SameSite=Lax cookies: browsers send Origin on cross-site writes,

@@ -1,14 +1,23 @@
 # Kyvag CRM backend
 
-Express + SQLite API for the Kyvag CRM frontend.
+Express + PostgreSQL (through Prisma) API for the Kyvag CRM frontend.
 
 ```bash
-cp .env.example .env
-npm install
-npm run seed        # dev account kumaravel@kyvag.com; password Kyvag@2026 (override with SEED_PASSWORD)
-# npm run seed:demo # optional: also ~580 sample leads, to try the dashboard and lists
+cp .env.example .env  # then set DATABASE_URL to your Postgres database
+npm install           # also generates the Prisma client
+npm run db:deploy     # creates the tables
+npm run seed          # dev account kumaravel@kyvag.com; password Kyvag@2026 (override with SEED_PASSWORD)
+# npm run seed:demo   # optional: also ~580 sample leads, to try the dashboard and lists
 npm run dev
 ```
+
+## Database
+
+- The schema is in `prisma/schema.prisma`; migrations are in `prisma/migrations`.
+- Changing the schema: edit it, then `npm run db:migrate -- --name what-changed`. That writes a migration, applies it to your database and regenerates the client.
+- On a server: `npm run db:deploy` applies any new migrations and never resets data.
+- `npm run db:studio` opens a browser view of the data.
+- Times are stored in UTC; the dashboard counts days in `TIME_ZONE` (default `Asia/Kolkata`).
 
 ## Auth
 

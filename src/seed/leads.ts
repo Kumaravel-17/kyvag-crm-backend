@@ -2,7 +2,7 @@
 // filters and paging have real numbers to work with. Uses a fixed random seed, so every run produces the same data.
 import { addActivity } from "../crm/activities.js";
 import { CHANNEL_LABEL, PAID, createLead, type Channel } from "../crm/leads.js";
-import { db } from "../db.js";
+import { prisma } from "../db.js";
 import { SAMPLE_LEADS } from "./sampleLeads.js";
 
 const MIN = 60_000;
@@ -64,37 +64,37 @@ const ageMinutes = (label: string) => {
 };
 
 /** Capture, auto-reply and latest touch, so every lead's timeline starts out consistent with its fields */
-function seedTimeline(leadId: string, source: Channel, ad: string | undefined, createdAt: number, firstReplyMin: number | null, last: string, lastAt: number) {
-  addActivity({ leadId, kind: "capture", text: `Lead captured · ${CHANNEL_LABEL[source]}${ad && ad !== "—" ? ` · ${ad}` : ""}`, at: createdAt });
+async function seedTimeline(leadId: string, source: Channel, ad: string | undefined, createdAt: number, firstReplyMin: number | null, last: string, lastAt: number) {
+  await addActivity({ leadId, kind: "capture", text: `Lead captured · ${CHANNEL_LABEL[source]}${ad && ad !== "—" ? ` · ${ad}` : ""}`, at: createdAt });
   if (firstReplyMin !== null) {
     const seconds = Math.round(firstReplyMin * 60);
     const after = seconds < 60 ? `${seconds} seconds` : `${Math.round(firstReplyMin)} min`;
-    addActivity({ leadId, kind: "auto", text: `First reply sent on ${CHANNEL_LABEL[source]} in ${after}`, at: createdAt + firstReplyMin * MIN });
+    await addActivity({ leadId, kind: "auto", text: `First reply sent on ${CHANNEL_LABEL[source]} in ${after}`, at: createdAt + firstReplyMin * MIN });
   }
   if (lastAt > createdAt + (firstReplyMin ?? 0) * MIN) {
     const kind = /call/i.test(last) ? "call" : /demo|meeting/i.test(last) ? "meeting" : /whatsapp/i.test(last) ? "whatsapp" : /trial|product|quote|paying/i.test(last) ? "trial" : "message";
-    addActivity({ leadId, kind, text: last, at: lastAt });
+    await addActivity({ leadId, kind, text: last, at: lastAt });
   }
 }
 
-export function seedLeads(repIds: Record<string, string>, now = Date.now()) {
-  if ((db.prepare("SELECT COUNT(*) AS n FROM leads").get() as { n: number }).n > 0) return 0;
+export async function seedLeads(repIds: Record<string, string>, now = Date.now()) {
+  if ((await prisma.lead.count()) > 0) return 0;
   const reps = Object.values(repIds);
   let created = 0;
 
-  db.transaction(() => {
+  {
     // The hand-written samples keep their ids and ages
     for (const l of SAMPLE_LEADS) {
       const createdAt = now - ageMinutes(l.created) * MIN;
       const paidAt = l.stage === PAID ? Math.min(now - 2 * 60 * MIN, createdAt + 12 * DAY) : null;
-      createLead({
+      await createLead({
         id: l.id, name: l.name, company: l.company, email: l.email, phone: l.phone, domain: l.domain, city: l.city, language: l.language,
         source: l.source as Channel, stage: l.stage, score: l.score, ownerId: repIds[l.ownerId] ?? null, platform: l.platform,
         storeSize: l.storeSize, category: l.category, tags: l.tags, utm: l.utm, duplicates: (l.duplicates ?? []) as Channel[],
         lastActivity: l.lastActivity, firstReplyMin: l.firstReplyMin, trialDay: l.trial?.day ?? null, createdAt, paidAt,
       });
       const lastAt = paidAt ?? Math.min(now - 5 * MIN, createdAt + Math.max(30 * MIN, (now - createdAt) * 0.8));
-      seedTimeline(l.id, l.source as Channel, l.utm.ad, createdAt, l.firstReplyMin, l.lastActivity, lastAt);
+      await seedTimeline(l.id, l.source as Channel, l.utm.ad, createdAt, l.firstReplyMin, l.lastActivity, lastAt);
       created++;
     }
 
@@ -110,7 +110,7 @@ export function seedLeads(repIds: Record<string, string>, now = Date.now()) {
     }
     generated.sort((a, b) => a.createdAt - b.createdAt);
 
-    generated.forEach(({ createdAt }, i) => {
+    for (const [i, { createdAt }] of generated.entries()) {
       const ageDays = (now - createdAt) / DAY;
       let step = 0;
       while (step < ADVANCE.length && r() < ADVANCE[step] * Math.min(1, (ageDays + 0.5) / (3 * (step + 1)))) step++;
@@ -129,7 +129,7 @@ export function seedLeads(repIds: Record<string, string>, now = Date.now()) {
       // Paid 6–26 days after arriving, or for newer leads somewhere between arriving and now
       const paidAt = stage === PAID ? createdAt + Math.min((6 + r() * 20) * DAY, (now - createdAt) * (0.4 + r() * 0.55)) : null;
       const lastActivity = pick(r, LAST_ACTIVITY[stage]);
-      const lead = createLead({
+      const lead = await createLead({
         id: `L-${1001 + i}`,
         name: `${first} ${last}`,
         company,
@@ -154,9 +154,9 @@ export function seedLeads(repIds: Record<string, string>, now = Date.now()) {
         paidAt,
       });
       const lastAt = paidAt ?? Math.min(now - 5 * MIN, createdAt + Math.max(20 * MIN, (now - createdAt) * r()));
-      seedTimeline(lead.id, source, undefined, createdAt, firstReplyMin, lastActivity, lastAt);
+      await seedTimeline(lead.id, source, undefined, createdAt, firstReplyMin, lastActivity, lastAt);
       created++;
-    });
-  })();
+    }
+  }
   return created;
 }

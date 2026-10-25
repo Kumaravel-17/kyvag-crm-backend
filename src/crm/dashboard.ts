@@ -1,5 +1,5 @@
 import { config } from "../config.js";
-import { db } from "../db.js";
+import { prisma } from "../db.js";
 import { CHURNED, PAID, listLeads, type Channel } from "./leads.js";
 import { listStages } from "./pipeline.js";
 
@@ -29,11 +29,25 @@ const change = (now: number, before: number) => (before ? Math.round(((now - bef
 type Row = { created_at: number; paid_at: number | null; stage: string; source: Channel; first_reply_min: number | null; trial_day: number | null };
 
 /** Everything the overview page shows, worked out from the leads table */
-export function dashboard(now = Date.now()) {
+export async function dashboard(now = Date.now()) {
   // Six months back covers every window below
-  const rows = db
-    .prepare("SELECT created_at, paid_at, stage, source, first_reply_min, trial_day FROM leads WHERE created_at >= ? OR paid_at >= ?")
-    .all(now - 190 * DAY, now - 190 * DAY) as Row[];
+  const since = new Date(now - 190 * DAY);
+  const [records, stages, latest] = await Promise.all([
+    prisma.lead.findMany({
+      where: { OR: [{ createdAt: { gte: since } }, { paidAt: { gte: since } }] },
+      select: { createdAt: true, paidAt: true, stage: true, source: true, firstReplyMin: true, trialDay: true },
+    }),
+    listStages(),
+    listLeads({ page: 1, pageSize: 5 }),
+  ]);
+  const rows: Row[] = records.map((r) => ({
+    created_at: r.createdAt.getTime(),
+    paid_at: r.paidAt?.getTime() ?? null,
+    stage: r.stage,
+    source: r.source as Channel,
+    first_reply_min: r.firstReplyMin,
+    trial_day: r.trialDay,
+  }));
 
   // New leads today, against the same point in the day a week ago
   const today = dayKey(now);
@@ -49,7 +63,7 @@ export function dashboard(now = Date.now()) {
   const replyBefore = median(replies(now - 14 * DAY, now - 7 * DAY));
 
   // Trial → paid over the last 90 days: of leads that reached a trial, how many paid
-  const hasTrial = listStages().some((s) => s.id === "trial");
+  const hasTrial = stages.some((s) => s.id === "trial");
   const recent = rows.filter((r) => r.created_at >= now - 90 * DAY);
   const reachedTrial = recent.filter((r) => r.stage === "trial" || r.stage === PAID || (r.stage === CHURNED && r.trial_day !== null));
   const paidFromTrial = reachedTrial.filter((r) => r.stage === PAID).length;
@@ -77,7 +91,6 @@ export function dashboard(now = Date.now()) {
 
   // Funnel over the last 90 days: how many leads got at least as far as each stage. Churned leads are left out
   // because it isn't recorded where they dropped off.
-  const stages = listStages();
   const position = new Map(stages.map((s, i) => [s.id, i]));
   const cohort = recent.filter((r) => position.has(r.stage));
   const funnel = stages.map((s, i) => ({ id: s.id, label: s.label, value: cohort.filter((r) => position.get(r.stage)! >= i).length }));
@@ -100,6 +113,6 @@ export function dashboard(now = Date.now()) {
     topSource: top
       ? { source: top[0], count: top[1], share: Math.round((top[1] / thisWeek.length) * 100), change: change(top[1], priorWeek.filter((r) => r.source === top[0]).length) }
       : null,
-    latest: listLeads({ page: 1, pageSize: 5 }).leads,
+    latest: latest.leads,
   };
 }

@@ -3,6 +3,12 @@ import "dotenv/config";
 const env = process.env;
 const isProd = env.NODE_ENV === "production";
 
+function required(name: string) {
+  const value = env[name];
+  if (!value) throw new Error(`${name} is not set. Add it to .env (see .env.example).`);
+  return value;
+}
+
 const corsOrigins = (env.CORS_ORIGIN ?? "http://localhost:3000").split(",").map((o) => o.trim()).filter(Boolean);
 
 // A number means "trust this many proxy hops"; any other value is passed to Express as-is
@@ -14,7 +20,8 @@ export const config = {
   corsOrigins,
   // Where links in emails (password reset) point to
   appUrl: env.APP_URL ?? corsOrigins[0],
-  databasePath: env.DATABASE_PATH ?? "data/kyvag.db",
+  // PostgreSQL, e.g. postgresql://kyvag:secret@localhost:5432/kyvag
+  databaseUrl: required("DATABASE_URL"),
   cookieSecure: env.COOKIE_SECURE ? env.COOKIE_SECURE === "true" : isProd,
   trustProxy,
   // Where "today" and "this month" start for the dashboard, whatever time zone the server runs in

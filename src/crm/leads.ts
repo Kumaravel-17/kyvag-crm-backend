@@ -1,4 +1,4 @@
-import { db } from "../db.js";
+import { Prisma, prisma, type LeadRecord } from "../db.js";
 
 export const CHANNELS = ["instagram", "facebook", "whatsapp", "google", "youtube", "website", "linkedin", "csv", "referral", "email", "sms"] as const;
 export type Channel = (typeof CHANNELS)[number];
@@ -8,7 +8,7 @@ export const CHANNEL_LABEL: Record<Channel, string> = {
   linkedin: "LinkedIn", csv: "CSV import", referral: "Referral", email: "Email", sms: "SMS",
 };
 
-export const PLATFORMS =["Shopify", "WooCommerce", "Magento", "Custom", "None"] as const;
+export const PLATFORMS = ["Shopify", "WooCommerce", "Magento", "Custom", "None"] as const;
 export const STORE_SIZES = ["Solo", "2–10", "11–50", "50+"] as const;
 
 /** Leads that dropped out. Not part of the pipeline, so it can't be renamed or removed. */
@@ -16,37 +16,11 @@ export const CHURNED = "churned";
 /** The stage that makes a lead a customer */
 export const PAID = "paid";
 
-export type LeadRow = {
-  id: string;
-  seq: number;
-  name: string;
-  company: string;
-  email: string | null;
-  phone: string | null;
-  domain: string | null;
-  city: string | null;
-  language: string | null;
-  source: Channel;
-  stage: string;
-  score: number;
-  owner_id: string | null;
-  platform: string;
-  store_size: string | null;
-  category: string | null;
-  tags: string;
-  utm: string | null;
-  duplicates: string;
-  last_activity: string | null;
-  first_reply_min: number | null;
-  trial_day: number | null;
-  created_at: number;
-  updated_at: number;
-  paid_at: number | null;
-};
+type Utm = { source: string; campaign: string; adset: string; ad: string };
+const withOwner = { owner: { select: { name: true } } } as const;
+type LeadWithOwner = LeadRecord & { owner: { name: string } | null };
 
-type LeadWithOwner = LeadRow & { owner_name: string | null };
-
-/** The only shape of a lead that leaves the API */
+/** The only shape of a lead that leaves the API (timestamps as epoch ms) */
 export const publicLead = (l: LeadWithOwner) => ({
   id: l.id,
   name: l.name,
@@ -56,50 +30,43 @@ export const publicLead = (l: LeadWithOwner) => ({
   domain: l.domain,
   city: l.city,
   language: l.language,
-  source: l.source,
+  source: l.source as Channel,
   stage: l.stage,
   score: l.score,
-  ownerId: l.owner_id,
-  ownerName: l.owner_name,
+  ownerId: l.ownerId,
+  ownerName: l.owner?.name ?? null,
   platform: l.platform,
-  storeSize: l.store_size,
+  storeSize: l.storeSize,
   category: l.category,
-  tags: JSON.parse(l.tags) as string[],
-  utm: l.utm ? (JSON.parse(l.utm) as { source: string; campaign: string; adset: string; ad: string }) : null,
-  duplicates: JSON.parse(l.duplicates) as Channel[],
-  lastActivity: l.last_activity,
-  firstReplyMin: l.first_reply_min,
-  trialDay: l.trial_day,
-  createdAt: l.created_at,
-  updatedAt: l.updated_at,
-  paidAt: l.paid_at,
+  tags: l.tags,
+  utm: (l.utm as Utm | null) ?? null,
+  duplicates: l.duplicates as Channel[],
+  lastActivity: l.lastActivity,
+  firstReplyMin: l.firstReplyMin,
+  trialDay: l.trialDay,
+  createdAt: l.createdAt.getTime(),
+  updatedAt: l.updatedAt.getTime(),
+  paidAt: l.paidAt?.getTime() ?? null,
 });
 
-const SELECT = "SELECT l.*, u.name AS owner_name FROM leads l LEFT JOIN users u ON u.id = l.owner_id";
-
-export const getLead = (id: string) => db.prepare(`${SELECT} WHERE l.id = ?`).get(id) as LeadWithOwner | undefined;
+export const getLead = (id: string) => prisma.lead.findUnique({ where: { id }, include: withOwner });
 
 export type LeadFilters = { q?: string; stage?: string; source?: string; page: number; pageSize: number };
 
-/** Newest first, filtered and paged in SQL */
-export function listLeads({ q, stage, source, page, pageSize }: LeadFilters) {
-  const where: string[] = [];
-  const params: Record<string, unknown> = {};
-  if (stage) { where.push("l.stage = @stage"); params.stage = stage; }
-  if (source) { where.push("l.source = @source"); params.source = source; }
-  if (q) {
-    // % and _ in the search box are matched literally
-    params.q = `%${q.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
-    where.push(
-      `(l.name LIKE @q ESCAPE '\\' OR l.company LIKE @q ESCAPE '\\' OR l.domain LIKE @q ESCAPE '\\' OR l.email LIKE @q ESCAPE '\\'
-        OR l.phone LIKE @q ESCAPE '\\' OR l.city LIKE @q ESCAPE '\\' OR l.id LIKE @q ESCAPE '\\')`,
-    );
-  }
-  const clause = where.length ? `WHERE ${where.join(" AND ")}` : "";
-  const total = (db.prepare(`SELECT COUNT(*) AS n FROM leads l ${clause}`).get(params) as { n: number }).n;
-  const rows = db
-    .prepare(`${SELECT} ${clause} ORDER BY l.created_at DESC, l.seq DESC LIMIT @limit OFFSET @offset`)
-    .all({ ...params, limit: pageSize, offset: (page - 1) * pageSize }) as LeadWithOwner[];
+/** Newest first, filtered and paged in the database */
+export async function listLeads({ q, stage, source, page, pageSize }: LeadFilters) {
+  // Prisma passes % and _ through to ILIKE as wildcards; escaped, the search box matches them literally
+  const term = q?.replace(/[\\%_]/g, (c) => `\\${c}`);
+  const like = (field: "name" | "company" | "domain" | "email" | "phone" | "city" | "id") => ({ [field]: { contains: term, mode: "insensitive" as const } });
+  const where: Prisma.LeadWhereInput = {
+    ...(stage ? { stage } : {}),
+    ...(source ? { source } : {}),
+    ...(q ? { OR: (["name", "company", "domain", "email", "phone", "city", "id"] as const).map(like) } : {}),
+  };
+  const [total, rows] = await prisma.$transaction([
+    prisma.lead.count({ where }),
+    prisma.lead.findMany({ where, include: withOwner, orderBy: [{ createdAt: "desc" }, { seq: "desc" }], skip: (page - 1) * pageSize, take: pageSize }),
+  ]);
   return { leads: rows.map(publicLead), total, page, pageSize };
 }
 
@@ -119,71 +86,55 @@ export type NewLead = {
   storeSize?: string | null;
   category?: string | null;
   tags?: string[];
-  utm?: { source: string; campaign: string; adset: string; ad: string } | null;
+  utm?: Utm | null;
   duplicates?: Channel[];
   lastActivity?: string | null;
   firstReplyMin?: number | null;
   trialDay?: number | null;
+  /** Epoch ms; now by default */
   createdAt?: number;
   paidAt?: number | null;
   /** Keeps a known id (seed data); otherwise the next number is issued */
   id?: string;
 };
 
-export function createLead(input: NewLead) {
-  const now = Date.now();
-  const createdAt = input.createdAt ?? now;
-  const seq = input.id
-    ? Number(input.id.replace(/\D/g, ""))
-    : ((db.prepare("SELECT MAX(seq) AS n FROM leads").get() as { n: number | null }).n ?? 2000) + 1;
-  const id = input.id ?? `L-${seq}`;
-  db.prepare(
-    `INSERT INTO leads (id, seq, name, company, email, phone, domain, city, language, source, stage, score, owner_id, platform, store_size,
-       category, tags, utm, duplicates, last_activity, first_reply_min, trial_day, created_at, updated_at, paid_at)
-     VALUES (@id, @seq, @name, @company, @email, @phone, @domain, @city, @language, @source, @stage, @score, @owner_id, @platform, @store_size,
-       @category, @tags, @utm, @duplicates, @last_activity, @first_reply_min, @trial_day, @created_at, @updated_at, @paid_at)`,
-  ).run({
-    id,
-    seq,
-    name: input.name,
-    company: input.company,
-    email: input.email ?? null,
-    phone: input.phone ?? null,
-    domain: input.domain ?? null,
-    city: input.city ?? null,
-    language: input.language ?? null,
-    source: input.source,
-    stage: input.stage,
-    score: input.score ?? 50,
-    owner_id: input.ownerId ?? null,
-    platform: input.platform ?? "None",
-    store_size: input.storeSize ?? null,
-    category: input.category ?? null,
-    tags: JSON.stringify(input.tags ?? []),
-    utm: input.utm ? JSON.stringify(input.utm) : null,
-    duplicates: JSON.stringify(input.duplicates ?? []),
-    last_activity: input.lastActivity ?? null,
-    first_reply_min: input.firstReplyMin ?? null,
-    trial_day: input.trialDay ?? null,
-    created_at: createdAt,
-    updated_at: createdAt,
-    paid_at: input.paidAt ?? (input.stage === PAID ? createdAt : null),
-  });
-  return getLead(id)!;
-}
+const isUniqueClash = (e: unknown) => e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2002";
 
-const UPDATABLE = ["name", "company", "email", "phone", "domain", "city", "language", "source", "stage", "score", "owner_id", "platform", "store_size", "category", "tags", "last_activity", "paid_at"] as const;
-export type LeadUpdate = Partial<Pick<LeadRow, (typeof UPDATABLE)[number]>>;
-
-export function updateLead(id: string, changes: LeadUpdate) {
-  const keys = UPDATABLE.filter((k) => changes[k] !== undefined);
-  if (keys.length) {
-    const sets = keys.map((k) => `${k} = @${k}`).join(", ");
-    db.prepare(`UPDATE leads SET ${sets}, updated_at = @now WHERE id = @id`).run({ ...changes, id, now: Date.now() });
+export async function createLead(input: NewLead) {
+  const { id: fixedId, createdAt: createdMs, paidAt, utm, ...fields } = input;
+  const createdAt = new Date(createdMs ?? Date.now());
+  // Two leads added at the same moment can pick the same next number; the loser retries with the one after
+  for (let attempt = 0; ; attempt++) {
+    const seq = fixedId ? Number(fixedId.replace(/\D/g, "")) : ((await prisma.lead.aggregate({ _max: { seq: true } }))._max.seq ?? 2000) + 1;
+    try {
+      return await prisma.lead.create({
+        data: {
+          ...fields,
+          id: fixedId ?? `L-${seq}`,
+          seq,
+          utm: utm ?? Prisma.DbNull,
+          createdAt,
+          updatedAt: createdAt,
+          paidAt: paidAt != null ? new Date(paidAt) : input.stage === PAID ? createdAt : null,
+        },
+        include: withOwner,
+      });
+    } catch (e) {
+      if (fixedId || attempt >= 4 || !isUniqueClash(e)) throw e;
+    }
   }
-  return getLead(id)!;
 }
+
+export const updateLead = (id: string, changes: Prisma.LeadUncheckedUpdateInput) =>
+  prisma.lead.update({ where: { id }, data: changes, include: withOwner });
 
 /** For suggestions in the "type of business" box */
-export const listCategories = () =>
-  (db.prepare("SELECT DISTINCT category FROM leads WHERE category IS NOT NULL AND category != '' ORDER BY category").all() as { category: string }[]).map((r) => r.category);
+export async function listCategories() {
+  const rows = await prisma.lead.findMany({
+    where: { category: { not: null }, NOT: { category: "" } },
+    distinct: ["category"],
+    select: { category: true },
+    orderBy: { category: "asc" },
+  });
+  return rows.map((r) => r.category!);
+}

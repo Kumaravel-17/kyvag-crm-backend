@@ -1,9 +1,7 @@
-import { randomUUID } from "node:crypto";
 import type { CookieOptions, Request, Response } from "express";
 import { config } from "../config.js";
-import { db, type SessionRow, type UserRow } from "../db.js";
+import { prisma, type Session, type User } from "../db.js";
 import { hashToken, newToken } from "./crypto.js";
-import { getUserById } from "./users.js";
 
 export const SESSION_COOKIE = "kyvag_session";
 
@@ -21,44 +19,45 @@ function setCookie(res: Response, token: string, persistent: boolean) {
 
 export const clearSessionCookie = (res: Response) => res.clearCookie(SESSION_COOKIE, cookieBase);
 
-export function startSession(req: Request, res: Response, userId: string, persistent: boolean) {
+export async function startSession(req: Request, res: Response, userId: string, persistent: boolean) {
   const token = newToken();
-  const now = Date.now();
-  db.prepare(
-    `INSERT INTO sessions (id, token_hash, user_id, persistent, created_at, last_seen_at, expires_at, ip, user_agent)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-  ).run(randomUUID(), hashToken(token), userId, persistent ? 1 : 0, now, now, now + ttl(persistent), req.ip ?? null, req.get("user-agent")?.slice(0, 300) ?? null);
+  await prisma.session.create({
+    data: {
+      tokenHash: hashToken(token),
+      userId,
+      persistent,
+      expiresAt: new Date(Date.now() + ttl(persistent)),
+      ip: req.ip ?? null,
+      userAgent: req.get("user-agent")?.slice(0, 300) ?? null,
+    },
+  });
   setCookie(res, token, persistent);
 }
 
 /** Resolves the session cookie to a live session and its user, sliding the expiry forward */
-export function resumeSession(req: Request, res: Response): { session: SessionRow; user: UserRow } | null {
+export async function resumeSession(req: Request, res: Response): Promise<{ session: Session; user: User } | null> {
   const token = req.cookies?.[SESSION_COOKIE];
   if (typeof token !== "string" || !token) return null;
 
-  const session = db.prepare("SELECT * FROM sessions WHERE token_hash = ?").get(hashToken(token)) as SessionRow | undefined;
-  if (!session) return null;
+  const found = await prisma.session.findUnique({ where: { tokenHash: hashToken(token) }, include: { user: true } });
+  if (!found) return null;
+  const { user, ...session } = found;
 
   const now = Date.now();
-  const user = getUserById(session.user_id);
-  if (session.expires_at <= now || !user || user.disabled) {
-    endSession(session.id);
+  if (session.expiresAt.getTime() <= now || user.disabled) {
+    await endSession(session.id);
     return null;
   }
 
-  if (now - session.last_seen_at > TOUCH_EVERY) {
-    const persistent = session.persistent === 1;
-    db.prepare("UPDATE sessions SET last_seen_at = ?, expires_at = ? WHERE id = ?").run(now, now + ttl(persistent), session.id);
-    if (persistent) setCookie(res, token, true);
+  if (now - session.lastSeenAt.getTime() > TOUCH_EVERY) {
+    await prisma.session.update({ where: { id: session.id }, data: { lastSeenAt: new Date(now), expiresAt: new Date(now + ttl(session.persistent)) } });
+    if (session.persistent) setCookie(res, token, true);
   }
   return { session, user };
 }
 
-export const endSession = (id: string) => db.prepare("DELETE FROM sessions WHERE id = ?").run(id);
+export const endSession = (id: string) => prisma.session.deleteMany({ where: { id } });
 
 /** Signs the user out everywhere, optionally keeping the session making the request */
 export const endUserSessions = (userId: string, exceptId?: string) =>
-  db.prepare("DELETE FROM sessions WHERE user_id = ? AND id IS NOT ?").run(userId, exceptId ?? null);
-
-export const listUserSessions = (userId: string) =>
-  db.prepare("SELECT * FROM sessions WHERE user_id = ? AND expires_at > ? ORDER BY last_seen_at DESC").all(userId, Date.now()) as SessionRow[];
+  prisma.session.deleteMany({ where: { userId, ...(exceptId ? { id: { not: exceptId } } : {}) } });

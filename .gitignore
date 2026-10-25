@@ -2,3 +2,5 @@ node_modules
 dist
 .env
 data
+# Generated from prisma/schema.prisma by `prisma generate` (runs on npm install and build)
+src/generated
